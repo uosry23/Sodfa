@@ -60,12 +60,20 @@ export function AuthProvider({ children }) {
   // Sign in anonymously
   const anonymousSignIn = async () => {
     setError(null);
-    const result = await signInAsAnonymous();
-    if (result.error) {
-      setError(result.error);
+    try {
+      const result = await signInAsAnonymous();
+      if (result.error) {
+        // Set user-friendly error message
+        setError(result.error);
+        return false;
+      }
+      return true;
+    } catch (err) {
+      // Handle unexpected errors
+      console.error("Unexpected error during anonymous sign in:", err);
+      setError("An unexpected error occurred. Please try again later.");
       return false;
     }
-    return true;
   };
 
   // Sign in with email and password

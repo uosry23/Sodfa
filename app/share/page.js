@@ -143,8 +143,30 @@ export default function SharePage() {
             tags: []
           });
         } else {
-          console.error('Story submission failed:', result.error);
-          setSubmitError(result.error || 'فشل في إرسال القصة. يرجى المحاولة مرة أخرى.');
+          console.error('Story submission failed:', result.error, result.errorCode);
+
+          // Display appropriate error message based on error code
+          let errorMessage = 'فشل في إرسال القصة. يرجى المحاولة مرة أخرى.';
+
+          if (result.errorCode) {
+            switch (result.errorCode) {
+              case 'auth/network-request-failed':
+                errorMessage = 'خطأ في الشبكة. يرجى التحقق من اتصالك بالإنترنت والمحاولة مرة أخرى.';
+                break;
+              case 'auth/too-many-requests':
+                errorMessage = 'طلبات كثيرة جدًا. يرجى المحاولة مرة أخرى لاحقًا أو تسجيل الدخول بحساب.';
+                break;
+              case 'auth/operation-not-allowed':
+                errorMessage = 'تسجيل الدخول المجهول غير مسموح به. يرجى تسجيل الدخول بحساب.';
+                break;
+              default:
+                errorMessage = result.error || 'فشل في إرسال القصة. يرجى المحاولة مرة أخرى.';
+            }
+          } else {
+            errorMessage = result.error || 'فشل في إرسال القصة. يرجى المحاولة مرة أخرى.';
+          }
+
+          setSubmitError(errorMessage);
         }
       } catch (error) {
         console.error('Error submitting story:', error);

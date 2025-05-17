@@ -6,7 +6,8 @@ import Image from 'next/image';
 import Link from 'next/link';
 import { useParams } from 'next/navigation';
 import { useAuth } from '../../../context/AuthContext';
-import { getStoryById, likeStory, checkReaction, addComment, getCommentsByStoryId } from '../../../lib/firebase';
+import { getStoryById, likeStory, checkReaction, addComment, getCommentsByStoryId, deleteStory } from '../../../lib/firebase';
+import { getClientId } from '../../../lib/clientId';
 import UserNav from '../../components/UserNav';
 
 // No fallback data - we'll handle errors properly
@@ -41,6 +42,48 @@ export default function StoryPage() {
   const [comments, setComments] = useState([]);
   const [newComment, setNewComment] = useState('');
   const [submittingComment, setSubmittingComment] = useState(false);
+  const [loadingComments, setLoadingComments] = useState(false);
+
+  // State for index warning
+  const [indexWarning, setIndexWarning] = useState(null);
+  const [indexUrl, setIndexUrl] = useState(null);
+
+  // State for deleting story
+  const [deletingStory, setDeletingStory] = useState(false);
+  const [deleteError, setDeleteError] = useState(null);
+
+  // Function to fetch comments
+  const fetchComments = async () => {
+    setLoadingComments(true);
+    setIndexWarning(null);
+    setIndexUrl(null);
+
+    try {
+      // Use a high limit (200) to ensure we get all comments
+      const commentsResult = await getCommentsByStoryId(params.id, 200);
+
+      if (commentsResult.error) {
+        console.error('Error fetching comments:', commentsResult.error);
+        // If there's an index URL, store it for the user
+        if (commentsResult.indexUrl) {
+          setIndexUrl(commentsResult.indexUrl);
+          setIndexWarning('This query requires a Firestore index. Please create it in the Firebase console.');
+        }
+      } else {
+        setComments(commentsResult.comments || []);
+        console.log(`Loaded ${commentsResult.comments?.length || 0} comments for story ${params.id}`);
+
+        // Check if there's an index warning
+        if (commentsResult.indexWarning) {
+          setIndexWarning(commentsResult.indexWarning);
+        }
+      }
+    } catch (err) {
+      console.error('Error fetching comments:', err);
+    } finally {
+      setLoadingComments(false);
+    }
+  };
 
   // Fetch story data from Firebase
   useEffect(() => {
@@ -61,13 +104,13 @@ export default function StoryPage() {
           setLoveCount(result.story.loves || 0);
 
           // Fetch comments for this story
-          const commentsResult = await getCommentsByStoryId(params.id);
-          if (!commentsResult.error) {
-            setComments(commentsResult.comments || []);
-          }
+          await fetchComments();
 
           // Check if user has reacted to this story
-          const reactionResult = await checkReaction(params.id);
+          // For shadow users, we don't track individual reactions
+          // so this will always return false
+          const clientId = getClientId();
+          const reactionResult = await checkReaction(params.id, clientId);
           if (reactionResult.reacted) {
             setReaction(reactionResult.type);
           }
@@ -89,6 +132,20 @@ export default function StoryPage() {
       fetchStory();
     }
   }, [params.id, user]);
+
+  // Refresh comments periodically
+  useEffect(() => {
+    // Don't set up the interval if there's no story loaded
+    if (!story) return;
+
+    // Refresh comments every 30 seconds
+    const intervalId = setInterval(() => {
+      fetchComments();
+    }, 30000);
+
+    // Clean up the interval when the component unmounts
+    return () => clearInterval(intervalId);
+  }, [story, params.id]);
 
   const handleReaction = async (type) => {
     // Store original state to revert if needed
@@ -130,16 +187,34 @@ export default function StoryPage() {
         }
       }
 
-      // No need to check for user, we'll create anonymous user if needed
-      console.log("Sending reaction:", type, "for story:", params.id);
-      const result = await likeStory(params.id, type);
+      // Get client ID for non-logged in users
+      const clientId = getClientId();
+
+      // Send reaction with client ID
+      console.log("Sending reaction:", type, "for story:", params.id, "with clientId:", clientId);
+      const result = await likeStory(params.id, type, clientId);
 
       if (result.error) {
-        console.error("Reaction error:", result.error);
+        console.error("Reaction error:", result.error, result.errorCode);
         // Revert UI changes on error
         setReaction(originalReaction);
         setLikeCount(originalLikeCount);
         setLoveCount(originalLoveCount);
+
+        // Display appropriate error message based on error code
+        let errorMessage = 'فشل في التفاعل مع القصة. يرجى المحاولة مرة أخرى.';
+
+        if (result.errorCode === 'auth/network-request-failed') {
+          errorMessage = 'خطأ في الشبكة. يرجى التحقق من اتصالك بالإنترنت والمحاولة مرة أخرى.';
+        } else if (result.errorCode === 'auth/too-many-requests') {
+          errorMessage = 'طلبات كثيرة جدًا. يرجى المحاولة مرة أخرى لاحقًا أو تسجيل الدخول بحساب.';
+        } else if (result.errorCode === 'auth/operation-not-allowed') {
+          errorMessage = 'تسجيل الدخول المجهول غير مسموح به. يرجى تسجيل الدخول بحساب.';
+        } else if (result.errorCode === 'auth/admin-restricted-operation') {
+          errorMessage = 'هذه العملية مقيدة للمستخدمين المجهولين. يرجى تسجيل الدخول بحساب عادي.';
+        }
+
+        alert(errorMessage);
         throw new Error(result.error);
       }
 
@@ -151,7 +226,10 @@ export default function StoryPage() {
       setLoveCount(originalLoveCount);
 
       console.error('Error reacting to story:', err);
-      alert('فشل في التفاعل مع القصة. يرجى المحاولة مرة أخرى.');
+      // Alert is already shown above if it's a known error
+      if (!err.message || !err.message.includes('Failed to create anonymous user')) {
+        alert('فشل في التفاعل مع القصة. يرجى المحاولة مرة أخرى.');
+      }
     }
   };
 
@@ -165,6 +243,33 @@ export default function StoryPage() {
     setShowShareOptions(false);
   };
 
+  // Handle story deletion
+  const handleDeleteStory = async () => {
+    if (window.confirm('هل أنت متأكد أنك تريد حذف هذه القصة؟ لا يمكن التراجع عن هذا الإجراء.')) {
+      setDeletingStory(true);
+      setDeleteError(null);
+
+      try {
+        // Get client ID for shadow users
+        const clientId = getClientId();
+
+        const result = await deleteStory(params.id, clientId);
+
+        if (!result.success) {
+          throw new Error(result.error || 'Failed to delete story');
+        }
+
+        // Redirect to stories page after successful deletion
+        router.push('/stories');
+
+      } catch (err) {
+        console.error('Error deleting story:', err);
+        setDeleteError('فشل في حذف القصة. يرجى المحاولة مرة أخرى.');
+        setDeletingStory(false);
+      }
+    }
+  };
+
   const handleCommentSubmit = async (e) => {
     e.preventDefault();
 
@@ -172,7 +277,8 @@ export default function StoryPage() {
       return;
     }
 
-    // No need to check for user, we'll create anonymous user if needed
+    // Get client ID for non-logged in users
+    const clientId = getClientId();
     setSubmittingComment(true);
 
     try {
@@ -191,22 +297,39 @@ export default function StoryPage() {
       // Clear comment input immediately for better UX
       setNewComment('');
 
-      const result = await addComment(params.id, newComment);
+      // Send comment with client ID
+      console.log("Sending comment for story:", params.id, "with clientId:", clientId);
+      const result = await addComment(params.id, newComment, clientId);
 
       if (result.error) {
         // Remove the temporary comment if there was an error
         setComments(prev => prev.filter(c => c.id !== tempComment.id));
+
+        // Display appropriate error message based on error code
+        let errorMessage = 'فشل في إضافة تعليق. يرجى المحاولة مرة أخرى.';
+
+        if (result.errorCode === 'auth/network-request-failed') {
+          errorMessage = 'خطأ في الشبكة. يرجى التحقق من اتصالك بالإنترنت والمحاولة مرة أخرى.';
+        } else if (result.errorCode === 'auth/too-many-requests') {
+          errorMessage = 'طلبات كثيرة جدًا. يرجى المحاولة مرة أخرى لاحقًا أو تسجيل الدخول بحساب.';
+        } else if (result.errorCode === 'auth/operation-not-allowed') {
+          errorMessage = 'تسجيل الدخول المجهول غير مسموح به. يرجى تسجيل الدخول بحساب.';
+        } else if (result.errorCode === 'auth/admin-restricted-operation') {
+          errorMessage = 'هذه العملية مقيدة للمستخدمين المجهولين. يرجى تسجيل الدخول بحساب عادي.';
+        }
+
+        alert(errorMessage);
         throw new Error(result.error);
       }
 
       // Refresh comments to get the real one from the server
-      const commentsResult = await getCommentsByStoryId(params.id);
-      if (!commentsResult.error) {
-        setComments(commentsResult.comments || []);
-      }
+      await fetchComments();
     } catch (err) {
       console.error('Error adding comment:', err);
-      alert('فشل في إضافة تعليق. يرجى المحاولة مرة أخرى.');
+      // Alert is already shown above if it's a known error
+      if (!err.message || !err.message.includes('Failed to create anonymous user')) {
+        alert('فشل في إضافة تعليق. يرجى المحاولة مرة أخرى.');
+      }
     } finally {
       setSubmittingComment(false);
     }
@@ -404,8 +527,26 @@ export default function StoryPage() {
 
           <div className="story-container">
             <article>
+              {/* Delete error message */}
+              {deleteError && (
+                <div className="bg-red-100 border border-red-400 text-red-700 px-6 py-4 rounded-lg mb-6">
+                  <p>{deleteError}</p>
+                </div>
+              )}
+
               <div className="flex justify-between items-start mb-6">
                 <h1 className="text-3xl md:text-4xl font-bold">{story.title}</h1>
+
+                {/* Show delete button if user is the author */}
+                {user && story.authorId === user.uid && (
+                  <button
+                    onClick={handleDeleteStory}
+                    disabled={deletingStory}
+                    className="text-red-600 hover:text-red-800 font-medium text-sm flex items-center px-3 py-1 border border-red-300 rounded-md hover:bg-red-50 transition-colors"
+                  >
+                    {deletingStory ? 'جاري الحذف...' : 'حذف القصة'}
+                  </button>
+                )}
                 {story.status === 'pending' && (
                   <span className="text-sm px-3 py-1 rounded bg-yellow-100 text-yellow-800 mr-4">
                     قيد الانتظار
@@ -477,16 +618,30 @@ export default function StoryPage() {
               </div>
 
               {/* Comments section */}
-              <div className="comments-section">
-                <h3 className="text-xl font-semibold mb-4">التعليقات ({comments.length})</h3>
+              <div className="comments-section mt-12 pt-8 border-t border-warm-gray/30">
+                <div className="flex items-center justify-between mb-6">
+                  <h3 className="text-2xl font-semibold">التعليقات ({comments.length})</h3>
+                  <button
+                    onClick={() => fetchComments()}
+                    className="text-sm text-accent hover:underline flex items-center gap-1"
+                    disabled={loadingComments}
+                  >
+                    {loadingComments ? 'جاري التحديث...' : 'تحديث التعليقات'}
+                    {!loadingComments && (
+                      <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                        <path d="M21.5 2v6h-6M2.5 22v-6h6M2 11.5a10 10 0 0 1 18.8-4.3M22 12.5a10 10 0 0 1-18.8 4.2" />
+                      </svg>
+                    )}
+                  </button>
+                </div>
 
                 {/* Comment form */}
-                <form onSubmit={handleCommentSubmit} className="mb-6">
+                <form onSubmit={handleCommentSubmit} className="mb-8 bg-cream/50 p-6 rounded-lg border border-warm-gray/20 shadow-sm">
                   <div className="form-group">
-                    <label htmlFor="comment" className="form-label">أضف تعليقًا</label>
+                    <label htmlFor="comment" className="form-label text-lg mb-2">أضف تعليقًا</label>
                     <textarea
                       id="comment"
-                      className="form-input form-textarea"
+                      className="form-input form-textarea w-full p-3 rounded-md border border-warm-gray/30 focus:border-accent focus:ring focus:ring-accent/20 transition"
                       placeholder="شارك أفكارك..."
                       value={newComment}
                       onChange={(e) => setNewComment(e.target.value)}
@@ -496,7 +651,7 @@ export default function StoryPage() {
                   </div>
                   <button
                     type="submit"
-                    className="action-btn"
+                    className="action-btn mt-3 bg-accent hover:bg-accent/90 text-white py-2 px-4 rounded-md transition"
                     disabled={submittingComment || !newComment.trim()}
                   >
                     {submittingComment ? 'جاري النشر...' : 'نشر التعليق'}
@@ -504,22 +659,65 @@ export default function StoryPage() {
                 </form>
 
                 {/* Comments list */}
-                {comments.length > 0 ? (
-                  comments.map(comment => (
-                    <div
-                      key={comment.id}
-                      className={`comment ${comment.isTemp ? 'opacity-70 border-dashed' : ''}`}
-                    >
-                      <div className="comment-header">
-                        <span className="comment-author">{comment.author}</span>
-                        <span>{comment.isTemp ? 'جاري النشر...' : formatDate(comment.createdAt || comment.date)}</span>
+                <div className="space-y-4">
+                  {/* Index warning message */}
+                  {indexWarning && (
+                    <div className="mb-4 p-4 bg-yellow-50 border border-yellow-200 rounded-lg">
+                      <div className="flex items-start">
+                        <div className="flex-shrink-0">
+                          <svg className="h-5 w-5 text-yellow-400" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor">
+                            <path fillRule="evenodd" d="M8.257 3.099c.765-1.36 2.722-1.36 3.486 0l5.58 9.92c.75 1.334-.213 2.98-1.742 2.98H4.42c-1.53 0-2.493-1.646-1.743-2.98l5.58-9.92zM11 13a1 1 0 11-2 0 1 1 0 012 0zm-1-8a1 1 0 00-1 1v3a1 1 0 002 0V6a1 1 0 00-1-1z" clipRule="evenodd" />
+                          </svg>
+                        </div>
+                        <div className="mr-3">
+                          <h3 className="text-sm font-medium text-yellow-800">تنبيه الفهرس</h3>
+                          <div className="mt-1 text-sm text-yellow-700">
+                            <p>{indexWarning}</p>
+                            {indexUrl && (
+                              <a
+                                href={indexUrl}
+                                target="_blank"
+                                rel="noopener noreferrer"
+                                className="mt-2 inline-flex items-center px-3 py-1.5 border border-yellow-300 text-xs font-medium rounded-md text-yellow-700 bg-yellow-50 hover:bg-yellow-100 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-yellow-500"
+                              >
+                                إنشاء الفهرس في Firebase
+                              </a>
+                            )}
+                          </div>
+                        </div>
                       </div>
-                      <p className="comment-content">{comment.content}</p>
                     </div>
-                  ))
-                ) : (
-                  <p className="text-foreground/70 text-center py-4">لا توجد تعليقات حتى الآن. كن أول من يشارك أفكاره!</p>
-                )}
+                  )}
+
+                  {loadingComments ? (
+                    <div className="flex flex-col items-center justify-center py-8">
+                      <div className="animate-spin rounded-full h-8 w-8 border-t-2 border-b-2 border-accent mb-2"></div>
+                      <p className="text-foreground/70">جاري تحميل التعليقات...</p>
+                    </div>
+                  ) : comments.length > 0 ? (
+                    <>
+                      <div className="mb-4 p-3 bg-accent/10 rounded-lg">
+                        <p className="text-accent font-medium text-sm">تم تحميل {comments.length} تعليق</p>
+                      </div>
+                      {comments.map(comment => (
+                        <div
+                          key={comment.id}
+                          className={`comment bg-white p-4 rounded-lg border border-warm-gray/20 shadow-sm ${comment.isTemp ? 'opacity-70 border-dashed' : ''}`}
+                        >
+                          <div className="comment-header flex justify-between items-center mb-2 text-sm text-foreground/70">
+                            <span className="comment-author font-medium text-foreground">{comment.author}</span>
+                            <span>{comment.isTemp ? 'جاري النشر...' : formatDate(comment.createdAt || comment.date)}</span>
+                          </div>
+                          <p className="comment-content text-foreground">{comment.content}</p>
+                        </div>
+                      ))}
+                    </>
+                  ) : (
+                    <div className="bg-cream/30 border border-warm-gray/20 rounded-lg p-6 text-center">
+                      <p className="text-foreground/70">لا توجد تعليقات حتى الآن. كن أول من يشارك أفكاره!</p>
+                    </div>
+                  )}
+                </div>
               </div>
             </article>
           </div>

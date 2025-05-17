@@ -57,9 +57,25 @@ export default function LoginPage() {
       const success = await anonymousSignIn();
       if (!success) {
         setIsLoading(false);
+
+        // Error is already set in the AuthContext and will be displayed
+        // via the useEffect that watches authError
       }
     } catch (err) {
-      setError(err.message || 'Failed to sign in anonymously');
+      console.error('Unexpected error during anonymous login:', err);
+
+      // Provide user-friendly error messages
+      let errorMessage = 'Failed to sign in anonymously';
+
+      if (err.code === 'auth/network-request-failed') {
+        errorMessage = 'Network error. Please check your internet connection and try again.';
+      } else if (err.code === 'auth/too-many-requests') {
+        errorMessage = 'Too many requests. Please try again later or sign in with an account.';
+      } else if (err.code === 'auth/operation-not-allowed') {
+        errorMessage = 'Anonymous sign-in is not enabled. Please use another sign-in method.';
+      }
+
+      setError(errorMessage);
       setIsLoading(false);
     }
   };
@@ -140,6 +156,12 @@ export default function LoginPage() {
               <Image src="/user.svg" alt="Anonymous" width={20} height={20} />
               <span>Continue Anonymously</span>
             </button>
+
+            {error && !showEmailForm && (
+              <div className="bg-red-100 border border-red-400 text-red-700 px-4 py-3 rounded mt-4 text-sm">
+                <p>{error}</p>
+              </div>
+            )}
 
             {!showEmailForm ? (
               <button

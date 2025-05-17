@@ -4,6 +4,7 @@ import { useState, useEffect } from 'react';
 import Image from 'next/image';
 import Link from 'next/link';
 import { getStories, getStoriesByTag, likeStory, checkReaction } from '../../lib/firebase';
+import { getClientId } from '../../lib/clientId';
 import UserNav from '../components/UserNav';
 import { useAuth } from '../../context/AuthContext';
 
@@ -67,16 +68,16 @@ export default function StoriesPage() {
           setAllTags(tags.length > 0 ? tags : DEFAULT_TAGS);
 
           // Check user reactions for each story
-          if (user) {
-            const reactions = {};
-            for (const story of allVisibleStories) {
-              const reaction = await checkReaction(story.id);
-              if (reaction.reacted) {
-                reactions[story.id] = reaction.type;
-              }
+          // For shadow users, we don't track individual reactions
+          const clientId = getClientId();
+          const reactions = {};
+          for (const story of allVisibleStories) {
+            const reaction = await checkReaction(story.id, clientId);
+            if (reaction.reacted) {
+              reactions[story.id] = reaction.type;
             }
-            setStoryReactions(reactions);
           }
+          setStoryReactions(reactions);
         } else {
           // No stories found
           setStories([]);
@@ -96,14 +97,13 @@ export default function StoriesPage() {
 
   // Handle story reactions (like/love)
   const handleReaction = async (storyId, reactionType) => {
-    if (!user) {
-      // Redirect to login if not logged in
-      window.location.href = '/login';
-      return;
-    }
-
     try {
-      const result = await likeStory(storyId, reactionType);
+      // Get client ID for non-logged in users
+      const clientId = getClientId();
+
+      // Send reaction with client ID
+      console.log("Sending reaction:", reactionType, "for story:", storyId, "with clientId:", clientId);
+      const result = await likeStory(storyId, reactionType, clientId);
 
       if (result.success) {
         // Update local state
@@ -143,6 +143,7 @@ export default function StoriesPage() {
       }
     } catch (error) {
       console.error('Error reacting to story:', error);
+      alert('فشل في التفاعل مع القصة. يرجى المحاولة مرة أخرى.');
     }
   };
 
